@@ -106,6 +106,6 @@ cd ~/.claude/plugins/local-marketplace/judgeme-review-manager/scripts
 4. Private replies send email directly to the customer - use for sensitive matters
 
 ## Self-Documentation
-Log API quirks/errors to: `/home/USER/biz/plugin-learnings/judgeme-review-manager.md`
+Log API quirks/errors to: `/Users/USER/biz/plugin-learnings/judgeme-review-manager.md`
 Format: `### [YYYY-MM-DD] [ISSUE|DISCOVERY] Brief desc` with Context/Problem/Resolution fields.
 Full workflow: `~/biz/docs/reference/agent-shared-context.md`
