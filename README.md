@@ -30,7 +30,7 @@ Dedicated agent for Judge.me product reviews and ratings
 ## Quick Start
 
 ```bash
-git clone https://github.com/YOUR_GITHUB_USER/claude-code-plugin-judgeme.git
+git clone https://github.com/bigl34/claude-code-plugin-judgeme.git
 cd claude-code-plugin-judgeme
 cp config.template.json config.json  # fill in your credentials
 cd scripts && npm install
