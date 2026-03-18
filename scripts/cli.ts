@@ -5,7 +5,7 @@
  * Zod-validated CLI for Judge.me product review management.
  */
 
-import { z, createCommand, runCli, cacheCommands, cliTypes } from "@local/cli-utils";
+import { z, createCommand, runCli, cacheCommands, cliTypes, wrapUntrustedField, buildSafeOutput } from "@local/cli-utils";
 import { JudgemeClient } from "./judgeme-client.js";
 
 // Define commands with Zod schemas
@@ -26,17 +26,36 @@ const commands = {
     }),
     async (args, client: JudgemeClient) => {
       const { page, perPage, productId, rating } = args as {
-        page?: number;
-        perPage?: number;
-        productId?: number;
-        rating?: number;
+        page?: number; perPage?: number; productId?: number; rating?: number;
       };
-      return client.listReviews({
-        page,
-        perPage,
-        shopifyProductId: productId,
-        rating,
+      const result: any = await client.listReviews({
+        page, perPage, shopifyProductId: productId, rating,
       });
+
+      const reviews = (result?.reviews || result?.data || []);
+      const wrappedReviews = (Array.isArray(reviews) ? reviews : []).map((r: any) => ({
+        metadata: {
+          id: r.id,
+          rating: r.rating,
+          created_at: r.created_at,
+          curated: r.curated,
+          verified: r.verified,
+          source: r.source,
+          product_id: r.product_id,
+        },
+        content: {
+          title: wrapUntrustedField("title", r.title, { maxChars: 500 }),
+          body: wrapUntrustedField("body", r.body, { maxChars: 8000 }),
+          reviewerName: wrapUntrustedField("reviewer.name", r.reviewer?.name, { maxChars: 200 }),
+          reviewerEmail: wrapUntrustedField("reviewer.email", r.reviewer?.email, { maxChars: 200 }),
+          productTitle: wrapUntrustedField("product_title", r.product_title, { maxChars: 500 }),
+        },
+      }));
+
+      return buildSafeOutput(
+        { command: "list-reviews", count: wrappedReviews.length, page: result?.current_page, totalPages: result?.total_pages },
+        { reviews: wrappedReviews }
+      );
     },
     "List product reviews with optional filters"
   ),
@@ -47,7 +66,28 @@ const commands = {
     }),
     async (args, client: JudgemeClient) => {
       const { id } = args as { id: number };
-      return client.getReview(id);
+      const result: any = await client.getReview(id);
+
+      const r = result?.review || result;
+      return buildSafeOutput(
+        {
+          command: "get-review",
+          id: r.id,
+          rating: r.rating,
+          created_at: r.created_at,
+          curated: r.curated,
+          verified: r.verified,
+          source: r.source,
+          product_id: r.product_id,
+        },
+        {
+          title: wrapUntrustedField("title", r.title, { maxChars: 500 }),
+          body: wrapUntrustedField("body", r.body, { maxChars: 8000 }),
+          reviewerName: wrapUntrustedField("reviewer.name", r.reviewer?.name, { maxChars: 200 }),
+          reviewerEmail: wrapUntrustedField("reviewer.email", r.reviewer?.email, { maxChars: 200 }),
+          productTitle: wrapUntrustedField("product_title", r.product_title, { maxChars: 500 }),
+        }
+      );
     },
     "Get a specific review by ID"
   ),
@@ -75,11 +115,33 @@ const commands = {
     }),
     async (args, client: JudgemeClient) => {
       const { search, rating, maxPages } = args as {
-        search: string;
-        rating?: number;
-        maxPages?: number;
+        search: string; rating?: number; maxPages?: number;
       };
-      return client.searchReviews({ search, rating, maxPages });
+      const result: any = await client.searchReviews({ search, rating, maxPages });
+
+      const reviews = (result?.reviews || result?.data || result || []);
+      const wrappedReviews = (Array.isArray(reviews) ? reviews : []).map((r: any) => ({
+        metadata: {
+          id: r.id,
+          rating: r.rating,
+          created_at: r.created_at,
+          curated: r.curated,
+          verified: r.verified,
+          product_id: r.product_id,
+        },
+        content: {
+          title: wrapUntrustedField("title", r.title, { maxChars: 500 }),
+          body: wrapUntrustedField("body", r.body, { maxChars: 8000 }),
+          reviewerName: wrapUntrustedField("reviewer.name", r.reviewer?.name, { maxChars: 200 }),
+          reviewerEmail: wrapUntrustedField("reviewer.email", r.reviewer?.email, { maxChars: 200 }),
+          productTitle: wrapUntrustedField("product_title", r.product_title, { maxChars: 500 }),
+        },
+      }));
+
+      return buildSafeOutput(
+        { command: "search-reviews", search, count: wrappedReviews.length },
+        { reviews: wrappedReviews }
+      );
     },
     "Search reviews by keyword"
   ),
@@ -136,10 +198,20 @@ const commands = {
     ),
     async (args, client: JudgemeClient) => {
       const { id, email } = args as { id?: number; email?: string };
-      if (id) {
-        return client.getReviewerById(id);
-      }
-      return client.getReviewerByEmail(email!);
+      const result: any = id ? await client.getReviewerById(id) : await client.getReviewerByEmail(email!);
+
+      const reviewer = result?.reviewer || result;
+      return buildSafeOutput(
+        {
+          command: "get-reviewer",
+          id: reviewer.id,
+          reviews_count: reviewer.reviews_count,
+        },
+        {
+          name: wrapUntrustedField("name", reviewer.name, { maxChars: 200 }),
+          email: wrapUntrustedField("email", reviewer.email, { maxChars: 200 }),
+        }
+      );
     },
     "Get reviewer info by ID or email"
   ),
@@ -159,7 +231,25 @@ const commands = {
     }),
     async (args, client: JudgemeClient) => {
       const { page, perPage } = args as { page?: number; perPage?: number };
-      return client.listProducts({ page, perPage });
+      const result: any = await client.listProducts({ page, perPage });
+
+      const products = (result?.products || result?.data || []);
+      const wrappedProducts = (Array.isArray(products) ? products : []).map((p: any) => ({
+        metadata: {
+          id: p.id,
+          external_id: p.external_id,
+          reviews_count: p.reviews_count,
+          average_rating: p.average_rating,
+        },
+        content: {
+          title: wrapUntrustedField("title", p.name || p.title, { maxChars: 500 }),
+        },
+      }));
+
+      return buildSafeOutput(
+        { command: "list-products", count: wrappedProducts.length },
+        { products: wrappedProducts }
+      );
     },
     "List products with reviews"
   ),
@@ -170,11 +260,24 @@ const commands = {
     }),
     async (args, client: JudgemeClient) => {
       const { shopifyId } = args as { shopifyId: number };
-      const product = await client.getProductByExternalId(shopifyId);
-      if (product) {
-        return { product };
+      const product: any = await client.getProductByExternalId(shopifyId);
+      if (!product) {
+        throw new Error("Product not found");
       }
-      throw new Error("Product not found");
+
+      const p = product;
+      return buildSafeOutput(
+        {
+          command: "lookup-product",
+          id: p.id,
+          external_id: p.external_id,
+          reviews_count: p.reviews_count,
+          average_rating: p.average_rating,
+        },
+        {
+          title: wrapUntrustedField("title", p.name || p.title, { maxChars: 500 }),
+        }
+      );
     },
     "Look up a product by Shopify product ID"
   ),
