@@ -1,22 +1,21 @@
 #!/usr/bin/env npx tsx
-/**
- * Judge.me Review Manager CLI
- *
- * Zod-validated CLI for Judge.me product review management.
- */
 
-import { z, createCommand, runCli, cacheCommands, cliTypes, wrapUntrustedField, buildSafeOutput } from "@local/cli-utils";
+import { z, createCommand, runCli, cacheCommands, cliTypes, wrapUntrustedField, buildSafeOutput, TRUNCATION_DEFAULTS } from "@local/cli-utils";
 import { JudgemeClient } from "./judgeme-client.js";
 
-// Define commands with Zod schemas
+const BODY = TRUNCATION_DEFAULTS.body;
+const SUBJECT = TRUNCATION_DEFAULTS.subject;
+const NAME = TRUNCATION_DEFAULTS.displayName;
+const nonBlankText = z.string().trim().min(1);
+
 const commands = {
   "list-tools": createCommand(
     z.object({}),
     async (_args, client: JudgemeClient) => ({ tools: client.listTools() }),
-    "List all available CLI commands"
+    "List all available CLI commands",
+    { sideEffect: "read" }
   ),
 
-  // Review commands
   "list-reviews": createCommand(
     z.object({
       page: cliTypes.int(1).optional().describe("Page number"),
@@ -32,32 +31,51 @@ const commands = {
         page, perPage, shopifyProductId: productId, rating,
       });
 
+      const shopDomain = client.getShopDomain();
+
       const reviews = (result?.reviews || result?.data || []);
-      const wrappedReviews = (Array.isArray(reviews) ? reviews : []).map((r: any) => ({
-        metadata: {
-          id: r.id,
-          rating: r.rating,
-          created_at: r.created_at,
-          curated: r.curated,
-          verified: r.verified,
-          source: r.source,
-          product_id: r.product_id,
-        },
-        content: {
-          title: wrapUntrustedField("title", r.title, { maxChars: 500 }),
-          body: wrapUntrustedField("body", r.body, { maxChars: 8000 }),
-          reviewerName: wrapUntrustedField("reviewer.name", r.reviewer?.name, { maxChars: 200 }),
-          reviewerEmail: wrapUntrustedField("reviewer.email", r.reviewer?.email, { maxChars: 200 }),
-          productTitle: wrapUntrustedField("product_title", r.product_title, { maxChars: 500 }),
-        },
-      }));
+      const wrappedReviews = (Array.isArray(reviews) ? reviews : []).map((r: any) => {
+        const reply = r.reply
+          ? {
+              body: wrapUntrustedField("reply.body", r.reply.body ?? "", { maxChars: BODY }),
+              created_at: r.reply.created_at,
+            }
+          : null;
+        return {
+          metadata: {
+            id: r.id,
+            rating: r.rating,
+            created_at: r.created_at,
+            curated: r.curated,
+            verified: r.verified,
+            source: r.source,
+            product_id: r.product_id,
+            product_external_id: r.product_external_id,
+            published: r.published,
+            hidden: r.hidden,
+            updated_at: r.updated_at,
+            reviewer_id: r.reviewer?.id,
+            shop_domain: shopDomain,
+          },
+          content: {
+            title: wrapUntrustedField("title", r.title, { maxChars: SUBJECT }),
+            body: wrapUntrustedField("body", r.body, { maxChars: BODY }),
+            reviewerName: wrapUntrustedField("reviewer.name", r.reviewer?.name, { maxChars: NAME }),
+            reviewerEmail: wrapUntrustedField("reviewer.email", r.reviewer?.email, { maxChars: NAME }),
+            productTitle: wrapUntrustedField("product_title", r.product_title, { maxChars: SUBJECT }),
+            pictures: r.pictures,
+            reply,
+          },
+        };
+      });
 
       return buildSafeOutput(
         { command: "list-reviews", count: wrappedReviews.length, page: result?.current_page, totalPages: result?.total_pages },
         { reviews: wrappedReviews }
       );
     },
-    "List product reviews with optional filters"
+    "List product reviews with optional filters",
+    { sideEffect: "read" }
   ),
 
   "get-review": createCommand(
@@ -75,6 +93,7 @@ const commands = {
           id: r.id,
           rating: r.rating,
           created_at: r.created_at,
+          updated_at: r.updated_at,
           curated: r.curated,
           verified: r.verified,
           source: r.source,
@@ -89,7 +108,8 @@ const commands = {
         }
       );
     },
-    "Get a specific review by ID"
+    "Get a specific review by ID",
+    { sideEffect: "read" }
   ),
 
   "count-reviews": createCommand(
@@ -104,7 +124,8 @@ const commands = {
         rating,
       });
     },
-    "Get review count with optional filters"
+    "Get review count with optional filters",
+    { sideEffect: "read" }
   ),
 
   "search-reviews": createCommand(
@@ -143,7 +164,8 @@ const commands = {
         { reviews: wrappedReviews }
       );
     },
-    "Search reviews by keyword"
+    "Search reviews by keyword",
+    { sideEffect: "read" }
   ),
 
   "curate-review": createCommand(
@@ -151,30 +173,35 @@ const commands = {
       id: cliTypes.int(1).describe("Review ID"),
       status: z.enum(["ok", "spam"]).describe("Curation status"),
     }),
-    async (args, client: JudgemeClient) => {
+    async (args, client: JudgemeClient, globals) => {
       const { id, status } = args as { id: number; status: "ok" | "spam" };
+      if (globals?.dryRun) {
+        return { dryRun: true, wouldCurate: { id, status } };
+      }
       return client.curateReview(id, status);
     },
-    "Mark review as ok or spam"
+    "Mark review as ok or spam",
+    { sideEffect: "write", requiresConfirmation: true, dryRunSupported: true }
   ),
 
   "reply-to-review": createCommand(
     z.object({
       reviewId: cliTypes.int(1).describe("Review ID to reply to"),
-      reply: z.string().min(1).describe("Public reply text"),
+      reply: nonBlankText.describe("Public reply text"),
     }),
     async (args, client: JudgemeClient) => {
       const { reviewId, reply } = args as { reviewId: number; reply: string };
       return client.replyToReview(reviewId, reply);
     },
-    "Post a public reply to a review"
+    "Post a public reply to a review",
+    { sideEffect: "external_send", requiresConfirmation: true }
   ),
 
   "private-reply": createCommand(
     z.object({
       reviewId: cliTypes.int(1).describe("Review ID to reply to"),
-      subject: z.string().min(1).describe("Email subject"),
-      body: z.string().min(1).describe("Email body"),
+      subject: nonBlankText.describe("Email subject"),
+      body: nonBlankText.describe("Email body"),
     }),
     async (args, client: JudgemeClient) => {
       const { reviewId, subject, body } = args as {
@@ -184,10 +211,10 @@ const commands = {
       };
       return client.sendPrivateReply(reviewId, subject, body);
     },
-    "Send private email reply to reviewer"
+    "Send private email reply to reviewer",
+    { sideEffect: "external_send", requiresConfirmation: true }
   ),
 
-  // Reviewer commands
   "get-reviewer": createCommand(
     z.object({
       id: cliTypes.int(1).optional().describe("Reviewer ID"),
@@ -213,17 +240,17 @@ const commands = {
         }
       );
     },
-    "Get reviewer info by ID or email"
+    "Get reviewer info by ID or email",
+    { sideEffect: "read" }
   ),
 
-  // Shop commands
   "shop-info": createCommand(
     z.object({}),
     async (_args, client: JudgemeClient) => client.getShopInfo(),
-    "Get shop information and statistics"
+    "Get shop information and statistics",
+    { sideEffect: "read" }
   ),
 
-  // Product commands
   "list-products": createCommand(
     z.object({
       page: cliTypes.int(1).optional().describe("Page number"),
@@ -251,7 +278,8 @@ const commands = {
         { products: wrappedProducts }
       );
     },
-    "List products with reviews"
+    "List products with reviews",
+    { sideEffect: "read" }
   ),
 
   "lookup-product": createCommand(
@@ -279,15 +307,15 @@ const commands = {
         }
       );
     },
-    "Look up a product by Shopify product ID"
+    "Look up a product by Shopify product ID",
+    { sideEffect: "read" }
   ),
 
-  // Pre-built cache commands
   ...cacheCommands<JudgemeClient>(),
 };
 
-// Run CLI
 runCli(commands, JudgemeClient, {
   programName: "judgeme-cli",
   description: "Judge.me product review management",
 });
+

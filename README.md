@@ -3,7 +3,7 @@
 
 Dedicated agent for Judge.me product reviews and ratings
 
-![Version](https://img.shields.io/badge/version-1.3.1-blue) ![License: MIT](https://img.shields.io/badge/License-MIT-green) ![Node >= 18](https://img.shields.io/badge/node-%3E%3D18-brightgreen)
+![Version](https://img.shields.io/badge/version-1.3.2-blue) ![License: MIT](https://img.shields.io/badge/License-MIT-green) ![Node >= 18](https://img.shields.io/badge/node-%3E%3D18-brightgreen)
 
 ## Features
 
@@ -33,11 +33,11 @@ Dedicated agent for Judge.me product reviews and ratings
 git clone https://github.com/bigl34/claude-code-plugin-judgeme.git
 cd claude-code-plugin-judgeme
 cp config.template.json config.json  # fill in your credentials
-cd scripts && npm install
+npm --prefix scripts install
 ```
 
 ```bash
-node scripts/dist/cli.js list-reviews
+npm --prefix scripts run cli -- list-reviews
 ```
 
 ## Installation
@@ -48,6 +48,14 @@ node scripts/dist/cli.js list-reviews
    ```bash
    cd scripts && npm install
    ```
+
+## Configuration
+
+Copy `config.template.json` to `config.json` and fill in the required values:
+
+| Field | Placeholder |
+|-------|-------------|
+| `credentials_path` | `/path/to/your/credentials` |
 
 ## Available Commands
 
@@ -84,34 +92,34 @@ node scripts/dist/cli.js list-reviews
 
 ```bash
 # List recent reviews (default 10 per page)
-node scripts/dist/cli.js list-reviews
+npm --prefix "scripts" run cli -- list-reviews
 
 # List reviews for a specific product
-node scripts/dist/cli.js list-reviews --product-id 12345
+npm --prefix "scripts" run cli -- list-reviews --product-id 12345
 
 # Filter by rating (1-5 stars)
-node scripts/dist/cli.js list-reviews --rating 5
+npm --prefix "scripts" run cli -- list-reviews --rating 5
 
 # Get a specific review
-node scripts/dist/cli.js get-review --id 67890
+npm --prefix "scripts" run cli -- get-review --id 67890
 
 # Count all reviews
-node scripts/dist/cli.js count-reviews
+npm --prefix "scripts" run cli -- count-reviews
 
 # Publish a review (set status to 'ok')
-node scripts/dist/cli.js curate-review --id 67890 --status ok
+npm --prefix "scripts" run cli -- curate-review --id 67890 --status ok --confirm
 
 # Hide a review (set status to 'spam')
-node scripts/dist/cli.js curate-review --id 67890 --status spam
+npm --prefix "scripts" run cli -- curate-review --id 67890 --status spam --confirm
 
 # Reply publicly to a review
-node scripts/dist/cli.js reply-to-review --review-id 67890 --reply "Thank you for your feedback!"
+npm --prefix "scripts" run cli -- reply-to-review --review-id 67890 --reply "Thank you for your feedback!" --confirm
 
 # Send private email to reviewer
-node scripts/dist/cli.js private-reply --review-id 67890 --subject "Thank you" --body "We appreciate your review..."
+npm --prefix "scripts" run cli -- private-reply --review-id 67890 --subject "Thank you" --body "We appreciate your review..." --confirm
 
 # Get shop info
-node scripts/dist/cli.js shop-info
+npm --prefix "scripts" run cli -- shop-info
 ```
 
 ## How It Works

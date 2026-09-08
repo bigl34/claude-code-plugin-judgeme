@@ -1,38 +1,19 @@
-/**
- * Judge.me API Client
- *
- * Direct client for the Judge.me Reviews API.
- * Provides access to product reviews for the YOUR_COMPANY Shopify store.
- *
- * Key features:
- * - Reviews: list, get, count, curate, search
- * - Replies: public replies and private emails
- * - Reviewers: lookup by ID or email
- * - Products: list and lookup by Shopify product ID
- * - Shop: aggregate metrics and info
- *
- * Uses both public and private API tokens for different operations.
- * Implements caching with configurable TTLs.
- */
 
-import { readFileSync } from 'fs';
-import { fileURLToPath } from 'url';
-import { dirname, join } from 'path';
+import { loadServiceConfig, z } from "@local/cli-utils";
 import { PluginCache, TTL, createCacheKey } from "@local/plugin-cache";
+import { fetchWithRetry } from "./vendor/retry/index.js";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-
-// Request timeout for API calls (30 seconds)
 const REQUEST_TIMEOUT_MS = 30_000;
 
-interface Config {
-  judgeme: {
-    shopDomain: string;
-    publicApiToken: string;
-    privateApiToken: string;
-  };
-}
+const JudgemeConfigSchema = z.object({
+  judgeme: z.object({
+    shopDomain: z.string().min(1),
+    publicApiToken: z.string().min(1),
+    privateApiToken: z.string().min(1),
+  }),
+});
+
+type Config = z.infer<typeof JudgemeConfigSchema>;
 
 interface Review {
   id: number;
@@ -98,8 +79,8 @@ interface ShopInfo {
 }
 
 interface Product {
-  id: number;  // Judge.me internal product ID
-  external_id: number;  // Shopify product ID
+  id: number;
+  external_id: number;
   title: string;
   handle: string;
 }
@@ -110,7 +91,6 @@ interface ProductsResponse {
   per_page: number;
 }
 
-// Initialize cache with namespace
 const cache = new PluginCache({
   namespace: "judgeme-review-manager",
   defaultTTL: TTL.FIFTEEN_MINUTES,
@@ -122,45 +102,38 @@ export class JudgemeClient {
   private cacheDisabled: boolean = false;
 
   constructor() {
-    // When compiled, __dirname is dist/, so look in parent for config.json
-    const configPath = join(__dirname, '..', 'config.json');
-    this.config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    this.config = loadServiceConfig("judgeme-review-manager", {
+      schema: JudgemeConfigSchema,
+    });
   }
 
-  // ============================================
-  // CACHE CONTROL
-  // ============================================
+  getShopDomain(): string {
+    return this.config.judgeme.shopDomain;
+  }
 
-  /** Disables caching for all subsequent requests. */
+
   disableCache(): void {
     this.cacheDisabled = true;
     cache.disable();
   }
 
-  /** Re-enables caching after it was disabled. */
   enableCache(): void {
     this.cacheDisabled = false;
     cache.enable();
   }
 
-  /** Returns cache statistics including hit/miss counts. */
   getCacheStats() {
     return cache.getStats();
   }
 
-  /** Clears all cached data. @returns Number of cache entries cleared */
   clearCache(): number {
     return cache.clear();
   }
 
-  /** Invalidates a specific cache entry by key. */
   invalidateCacheKey(key: string): boolean {
     return cache.invalidate(key);
   }
 
-  // ============================================
-  // INTERNAL
-  // ============================================
 
   private async request<T>(
     endpoint: string,
@@ -182,7 +155,6 @@ export class JudgemeClient {
       shop_domain: this.config.judgeme.shopDomain,
     });
 
-    // Add additional params, filtering out undefined values
     for (const [key, value] of Object.entries(params)) {
       if (value !== undefined) {
         queryParams.append(key, String(value));
@@ -191,16 +163,11 @@ export class JudgemeClient {
 
     const url = `${this.baseUrl}${endpoint}?${queryParams.toString()}`;
 
-    // Set up timeout with AbortController
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-
     const fetchOptions: RequestInit = {
       method,
       headers: {
         'Content-Type': 'application/json',
       },
-      signal: controller.signal,
     };
 
     if (body && method !== 'GET') {
@@ -208,7 +175,12 @@ export class JudgemeClient {
     }
 
     try {
-      const response = await fetch(url, fetchOptions);
+      const response = await fetchWithRetry(
+        url,
+        fetchOptions,
+        { maxRetries: 3, timeoutMs: REQUEST_TIMEOUT_MS },
+        "Judgeme.request"
+      );
 
       if (!response.ok) {
         const errorText = await response.text();
@@ -217,47 +189,33 @@ export class JudgemeClient {
 
       return response.json();
     } catch (error) {
-      if (error instanceof Error && error.name === "AbortError") {
+      if (error instanceof Error && /(timed out|timeout|abort)/i.test(error.message)) {
         throw new Error(`Judge.me API request timed out after ${REQUEST_TIMEOUT_MS / 1000}s`);
       }
       throw error;
-    } finally {
-      clearTimeout(timeoutId);
     }
   }
 
-  // ============================================
-  // REVIEW OPERATIONS
-  // ============================================
 
-  /**
-   * Lists reviews with optional filters.
-   *
-   * @param options - Filter and pagination options
-   * @param options.page - Page number (1-indexed)
-   * @param options.perPage - Results per page (max 100)
-   * @param options.productId - Judge.me internal product ID
-   * @param options.shopifyProductId - Shopify product ID (auto-converts to Judge.me ID)
-   * @param options.rating - Filter by star rating (1-5)
-   * @returns Paginated review list
-   *
-   * @cached TTL: 15 minutes
-   */
   async listReviews(options: {
     page?: number;
     perPage?: number;
-    productId?: number;  // Judge.me internal product ID
-    shopifyProductId?: number;  // Shopify product ID (external_id)
+    productId?: number;
+    shopifyProductId?: number;
     rating?: number;
   } = {}): Promise<ReviewsResponse> {
     let judgemeProductId = options.productId;
 
-    // If Shopify product ID provided, look up Judge.me internal ID
-    if (options.shopifyProductId && !judgemeProductId) {
+    if (options.shopifyProductId !== undefined && options.productId === undefined) {
       const product = await this.getProductByExternalId(options.shopifyProductId);
-      if (product) {
-        judgemeProductId = product.id;
+      if (product === null) {
+        return {
+          reviews: [],
+          current_page: options.page ?? 1,
+          per_page: options.perPage ?? 100,
+        };
       }
+      judgemeProductId = product.id;
     }
 
     const cacheKey = createCacheKey("reviews", {
@@ -273,7 +231,7 @@ export class JudgemeClient {
         const params: Record<string, string | number | undefined> = {
           page: options.page,
           per_page: options.perPage,
-          product_id: judgemeProductId,  // Use Judge.me internal ID
+          product_id: judgemeProductId,
           rating: options.rating,
         };
 
@@ -283,14 +241,6 @@ export class JudgemeClient {
     );
   }
 
-  /**
-   * Gets a single review by ID.
-   *
-   * @param id - Review ID
-   * @returns Review details including reply if present
-   *
-   * @cached TTL: 5 minutes
-   */
   async getReview(id: number): Promise<{ review: Review }> {
     const cacheKey = createCacheKey("review", { id });
 
@@ -301,30 +251,19 @@ export class JudgemeClient {
     );
   }
 
-  /**
-   * Counts reviews matching filter criteria.
-   *
-   * @param options - Filter options
-   * @param options.productId - Judge.me internal product ID
-   * @param options.shopifyProductId - Shopify product ID (auto-converts)
-   * @param options.rating - Filter by star rating (1-5)
-   * @returns Count of matching reviews
-   *
-   * @cached TTL: 15 minutes
-   */
   async countReviews(options: {
-    productId?: number;  // Judge.me internal product ID
-    shopifyProductId?: number;  // Shopify product ID (external_id)
+    productId?: number;
+    shopifyProductId?: number;
     rating?: number;
   } = {}): Promise<ReviewCountResponse> {
     let judgemeProductId = options.productId;
 
-    // If Shopify product ID provided, look up Judge.me internal ID
-    if (options.shopifyProductId && !judgemeProductId) {
+    if (options.shopifyProductId !== undefined && options.productId === undefined) {
       const product = await this.getProductByExternalId(options.shopifyProductId);
-      if (product) {
-        judgemeProductId = product.id;
+      if (product === null) {
+        return { count: 0 };
       }
+      judgemeProductId = product.id;
     }
 
     const cacheKey = createCacheKey("reviews_count", {
@@ -336,7 +275,7 @@ export class JudgemeClient {
       cacheKey,
       async () => {
         const params: Record<string, string | number | undefined> = {
-          product_id: judgemeProductId,  // Use Judge.me internal ID
+          product_id: judgemeProductId,
           rating: options.rating,
         };
 
@@ -346,40 +285,16 @@ export class JudgemeClient {
     );
   }
 
-  /**
-   * Curates a review (approve or mark as spam).
-   *
-   * @param id - Review ID
-   * @param status - Curation status: 'ok' (approve) or 'spam' (hide)
-   * @returns Updated review
-   *
-   * @invalidates review/*
-   */
   async curateReview(id: number, status: 'ok' | 'spam'): Promise<{ review: Review }> {
-    // Judge.me uses PUT to update review curation status
-    // The curated field can be: 'ok' (published), 'spam' (hidden), or null (pending)
     const result = await this.request<{ review: Review }>(`/reviews/${id}`, {
       method: 'PUT',
       body: { curated: status },
     });
-    // Invalidate review caches after mutation
     cache.invalidatePattern(/^review/);
     return result;
   }
 
-  /**
-   * Posts a public reply to a review.
-   *
-   * Public replies are visible on the storefront below the review.
-   *
-   * @param reviewId - Review ID to reply to
-   * @param reply - Reply text content
-   * @returns API response
-   *
-   * @invalidates review/{reviewId}
-   */
   async replyToReview(reviewId: number, reply: string): Promise<unknown> {
-    // POST /replies endpoint for public replies
     const result = await this.request<unknown>('/replies', {
       method: 'POST',
       body: {
@@ -387,28 +302,15 @@ export class JudgemeClient {
         body: reply
       },
     });
-    // Invalidate specific review cache
     cache.invalidate(createCacheKey("review", { id: reviewId }));
     return result;
   }
 
-  /**
-   * Sends a private email reply to a reviewer.
-   *
-   * Unlike public replies, this sends a direct email to the reviewer
-   * and is not displayed publicly.
-   *
-   * @param reviewId - Review ID to reply to
-   * @param subject - Email subject line
-   * @param body - Email body content
-   * @returns API response
-   */
   async sendPrivateReply(
     reviewId: number,
     subject: string,
     body: string
   ): Promise<unknown> {
-    // POST /private_replies endpoint for private emails
     return this.request<unknown>('/private_replies', {
       method: 'POST',
       body: {
@@ -419,18 +321,7 @@ export class JudgemeClient {
     });
   }
 
-  // ============================================
-  // REVIEWER OPERATIONS
-  // ============================================
 
-  /**
-   * Gets reviewer details by ID.
-   *
-   * @param id - Reviewer ID
-   * @returns Reviewer details including marketing preferences
-   *
-   * @cached TTL: 15 minutes
-   */
   async getReviewerById(id: number): Promise<{ reviewer: Reviewer }> {
     const cacheKey = createCacheKey("reviewer", { id });
 
@@ -441,14 +332,6 @@ export class JudgemeClient {
     );
   }
 
-  /**
-   * Looks up a reviewer by email address.
-   *
-   * @param email - Reviewer email address
-   * @returns Reviewer details if found
-   *
-   * @cached TTL: 15 minutes
-   */
   async getReviewerByEmail(email: string): Promise<{ reviewer: Reviewer }> {
     const cacheKey = createCacheKey("reviewer_email", { email });
 
@@ -461,19 +344,7 @@ export class JudgemeClient {
     );
   }
 
-  // ============================================
-  // SHOP OPERATIONS
-  // ============================================
 
-  /**
-   * Gets shop-level review metrics.
-   *
-   * Includes total review count, average rating, and plan info.
-   *
-   * @returns Shop info and aggregate metrics
-   *
-   * @cached TTL: 1 hour
-   */
   async getShopInfo(): Promise<unknown> {
     return cache.getOrFetch(
       "shop_info",
@@ -482,20 +353,7 @@ export class JudgemeClient {
     );
   }
 
-  // ============================================
-  // PRODUCT OPERATIONS
-  // ============================================
 
-  /**
-   * Lists products tracked by Judge.me.
-   *
-   * @param options - Pagination options
-   * @param options.page - Page number (1-indexed)
-   * @param options.perPage - Results per page (max 100)
-   * @returns Paginated product list with review stats
-   *
-   * @cached TTL: 1 hour
-   */
   async listProducts(options: {
     page?: number;
     perPage?: number;
@@ -519,25 +377,12 @@ export class JudgemeClient {
     );
   }
 
-  /**
-   * Looks up a Judge.me product by Shopify product ID.
-   *
-   * Judge.me uses internal product IDs, but most operations reference
-   * Shopify's external product ID. This method converts between them.
-   *
-   * @param externalId - Shopify product ID
-   * @returns Judge.me product or null if not found
-   *
-   * @cached TTL: 1 hour
-   */
   async getProductByExternalId(externalId: number): Promise<Product | null> {
     const cacheKey = createCacheKey("product_external", { externalId });
 
     return cache.getOrFetch(
       cacheKey,
       async () => {
-        // Search through products to find one matching the Shopify external_id
-        // Judge.me doesn't have a direct lookup endpoint, so we page through products
         let page = 1;
         const perPage = 100;
 
@@ -549,14 +394,12 @@ export class JudgemeClient {
             return product;
           }
 
-          // If we got fewer than perPage, we've reached the end
           if (response.products.length < perPage) {
             return null;
           }
 
           page++;
 
-          // Safety limit to prevent infinite loops
           if (page > 100) {
             return null;
           }
@@ -566,27 +409,11 @@ export class JudgemeClient {
     );
   }
 
-  // ============================================
-  // SEARCH OPERATIONS
-  // ============================================
 
-  /**
-   * Searches reviews by text content.
-   *
-   * Judge.me API doesn't support text search natively, so this method
-   * pages through reviews and filters client-side. Use sparingly due
-   * to high API call volume for large result sets.
-   *
-   * @param options - Search options
-   * @param options.search - Text to search for in review title/body
-   * @param options.rating - Filter by star rating (1-5)
-   * @param options.maxPages - Max pages to search (default: 10)
-   * @returns Matching reviews with search metadata
-   */
   async searchReviews(options: {
     search: string;
     rating?: number;
-    maxPages?: number;  // Limit pages to search (default 10)
+    maxPages?: number;
   }): Promise<{ reviews: Review[]; pagesSearched: number; totalMatches: number }> {
     const searchTerm = options.search.toLowerCase();
     const maxPages = options.maxPages || 10;
@@ -601,7 +428,6 @@ export class JudgemeClient {
         rating: options.rating,
       });
 
-      // Filter reviews by search term in body or title
       const matches = response.reviews.filter(r =>
         r.body?.toLowerCase().includes(searchTerm) ||
         r.title?.toLowerCase().includes(searchTerm)
@@ -609,7 +435,6 @@ export class JudgemeClient {
 
       matchingReviews.push(...matches);
 
-      // If we got fewer than perPage, we've reached the end
       if (response.reviews.length < perPage) {
         break;
       }
@@ -624,11 +449,7 @@ export class JudgemeClient {
     };
   }
 
-  // ============================================
-  // UTILITY
-  // ============================================
 
-  /** Returns list of available CLI commands. */
   listTools(): string[] {
     return [
       'list-reviews',
