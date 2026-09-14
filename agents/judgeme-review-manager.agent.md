@@ -1,7 +1,6 @@
 ---
 name: judgeme-review-manager
 description: Use this agent for Judge.me product review operations including listing reviews, responding to reviews, managing review status, and viewing shop metrics
-model: claude-opus-4-6
 color: success
 mode: subagent
 ---
